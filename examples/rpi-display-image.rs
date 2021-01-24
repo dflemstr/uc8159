@@ -47,7 +47,7 @@ fn main() -> anyhow::Result<()> {
             image::imageops::FilterType::Nearest,
         )
         .to_rgb8();
-    let palette = uc8159::Color::palette(1.0);
+    let palette = uc8159::Palette::new(1.0);
     eprintln!("palette: {:?}", palette);
 
     let padding_x = 0.max((display.width() - image.width() as usize) / 2);

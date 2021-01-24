@@ -1,9 +1,23 @@
+//! # `uc8159`
+//!
+//! This is a driver crate for accessing the `uc8159` E-Ink display controller.  For now, most of
+//! the options are hard-coded for the
+//! [Pimoroni Inky Impression](https://shop.pimoroni.com/products/inky-impression) display as that's
+//! the only one I own, so proposing changes to add more features is most welcome!
+//!
+//! # Usage
+//!
+//! Get started by creating a [`Display`] instance.  Populate the display buffer by using `fill`,
+//! `copy_from`, `set_pixel`, etc.  When you want to display the buffer contents to the screen, use
+//! `show`.
+
 #![cfg_attr(not(feature = "std"), no_std)]
 use core::convert;
 use core::marker;
 use core::mem;
 use core::slice;
 
+/// Colors available on a 7-color e-ink display.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum Color {
@@ -14,14 +28,20 @@ pub enum Color {
     Red = 4,
     Yellow = 5,
     Orange = 6,
+    /// The absence of any color, i.e. the display will show no ink, which usually just means it
+    /// will show traces of whatever was there before.
     Clean = 7,
 }
 
+/// A pre-computed palette which can be used to map arbitrary RGB colors onto a [`Display`].
 #[derive(Clone, Debug)]
 pub struct Palette([[u8; 3]; 7]);
 
+/// Configuration when creating a new [`Display`] instance.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Config {
+    /// The color that will be used to fill the outline around the display, which can't be
+    /// controlled as individual pixels.
     pub border_color: Color,
 }
 
@@ -64,6 +84,7 @@ enum Command {
     // TSSET = 0xE5,
 }
 
+/// An instance of a display which is governed by a particular `uc8159` controller.
 #[derive(Debug)]
 pub struct Display<SPI, TIMER, RESET, BUSY, DC, ERR = convert::Infallible>
 where
@@ -93,6 +114,13 @@ where
     DC: embedded_hal::digital::v2::OutputPin,
     ERR: From<SPI::Error> + From<RESET::Error> + From<BUSY::Error> + From<DC::Error>,
 {
+    /// Creates a new display instance.
+    ///
+    /// The provided `spi` bus will be used for most of the communication.  The `delay` instance
+    /// is used when waiting for reset and drawing operations to complete.  The `reset` pin can be
+    /// provided to make sure the device is reset before each new draw command.  The `busy` pin is
+    /// used to poll to see when draw operations are complete.  The `dc` pin is used to signal
+    /// whether the sent `spi` signal is a command (low) or data (high).
     pub fn new(spi: SPI, delay: DELAY, reset: RESET, busy: BUSY, dc: DC, config: Config) -> Self {
         let phantom = marker::PhantomData;
         let buffer = [0; WIDTH / 2 * HEIGHT];
@@ -109,24 +137,33 @@ where
         }
     }
 
+    /// The width of the display.
     pub fn width(&self) -> usize {
         WIDTH
     }
 
+    /// The height of the display.
     pub fn height(&self) -> usize {
         HEIGHT
     }
 
+    /// Fills the entire display using a single color.
+    ///
+    /// This is a pretty fast operation compared to e.g. calling `set_pixel`.
     pub fn fill(&mut self, color: Color) {
         self.buffer = [((color as u8) << 4) | color as u8; WIDTH / 2 * HEIGHT];
     }
 
+    /// Copies data from another source in bulk.
+    ///
+    /// The color data must contain exactly `width() * height()` elements and be in row-major order.
     pub fn copy_from(&mut self, color: &[Color]) {
         for (idx, cell) in color.chunks(2).enumerate() {
             self.buffer[idx] = ((cell[0] as u8) << 4) | cell[1] as u8;
         }
     }
 
+    /// Sets a specific pixel color.
     pub fn set_pixel(&mut self, x: usize, y: usize, color: Color) {
         let cell = &mut self.buffer[y * WIDTH / 2 + x / 2];
         if (x & 1) == 0 {
@@ -136,6 +173,9 @@ where
         }
     }
 
+    /// Displays the contents of the internal buffer to the screen.
+    ///
+    /// This operation blocks until the contents are completely shown.
     pub fn show(&mut self) -> Result<(), ERR> {
         self.setup()?;
 
@@ -303,21 +343,6 @@ impl Color {
         ]
     }
 
-    pub fn palette(saturation: f32) -> Palette {
-        let all_significant = Self::all_significant();
-        let mut colors = [[0; 3]; 7];
-        for (idx, color) in all_significant.iter().copied().enumerate() {
-            let [rs, gs, bs] = color.as_rgb_saturated();
-            let [rd, gd, bd] = color.as_rgb_desaturated();
-            let r_corr = (rs as f32 * saturation + rd as f32 * (1.0 - saturation)) as u8;
-            let g_corr = (gs as f32 * saturation + gd as f32 * (1.0 - saturation)) as u8;
-            let b_corr = (bs as f32 * saturation + bd as f32 * (1.0 - saturation)) as u8;
-
-            colors[idx] = [r_corr, g_corr, b_corr];
-        }
-        Palette(colors)
-    }
-
     fn as_rgb_desaturated(self) -> [u8; 3] {
         match self {
             Color::Black => [0, 0, 0],
@@ -346,6 +371,26 @@ impl Color {
 }
 
 impl Palette {
+    /// Creates a new palette using the provided saturation.
+    ///
+    /// The saturation should be within the range of 0.0 to 1.0, otherwise funky colors might
+    /// appear!
+    pub fn new(saturation: f32) -> Palette {
+        let all_significant = Color::all_significant();
+        let mut colors = [[0; 3]; 7];
+        for (idx, color) in all_significant.iter().copied().enumerate() {
+            let [rs, gs, bs] = color.as_rgb_saturated();
+            let [rd, gd, bd] = color.as_rgb_desaturated();
+            let r_corr = (rs as f32 * saturation + rd as f32 * (1.0 - saturation)) as u8;
+            let g_corr = (gs as f32 * saturation + gd as f32 * (1.0 - saturation)) as u8;
+            let b_corr = (bs as f32 * saturation + bd as f32 * (1.0 - saturation)) as u8;
+
+            colors[idx] = [r_corr, g_corr, b_corr];
+        }
+        Palette(colors)
+    }
+
+    /// Returns the closest color to the provided RGB value available in the palette.
     pub fn closest_color(&self, r: u8, g: u8, b: u8) -> Color {
         let idx = self
             .0
